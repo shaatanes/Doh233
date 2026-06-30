@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { User, Upstream, DnsLog, AuthLog, SystemConfig } from './types';
 import { 
   INITIAL_USERS, INITIAL_UPSTREAMS, INITIAL_DNS_LOGS, INITIAL_AUTH_LOGS, INITIAL_SYSTEM_CONFIG, 
@@ -43,7 +43,15 @@ export default function App() {
   // Worker Domain configuration for DoH Link generation
   const [workerBaseUrl, setWorkerBaseUrl] = useState<string>(() => {
     try {
-      return localStorage.getItem('cf_doh_worker_base_url') || 'https://cf-dns-over-https.your-subdomain.workers.dev';
+      const saved = localStorage.getItem('cf_doh_worker_base_url');
+      if (saved) return saved;
+      if (typeof window !== 'undefined' && window.location && window.location.origin) {
+        const origin = window.location.origin;
+        if (!origin.includes('localhost') && !origin.includes('127.0.0.1') && !origin.includes('europe-west2.run.app')) {
+          return origin;
+        }
+      }
+      return 'https://cf-dns-over-https.your-subdomain.workers.dev';
     } catch (e) {
       return 'https://cf-dns-over-https.your-subdomain.workers.dev';
     }
@@ -57,6 +65,58 @@ export default function App() {
       setTimeout(() => setCopiedUserId(null), 2000);
     } catch (e) {}
   };
+
+  // Load system password and configurations from the Worker API
+  useEffect(() => {
+    const apiBase = workerBaseUrl.replace(/\/$/, '');
+    if (workerBaseUrl.includes('your-subdomain')) return;
+
+    fetch(`${apiBase}/api/system`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.adminPasswordHash) {
+          setSystemConfig(prev => ({
+            ...prev,
+            adminPasswordHash: data.adminPasswordHash,
+            defaultUpstream: data.defaultUpstream || prev.defaultUpstream,
+            cacheTtl: data.cacheTtl || prev.cacheTtl,
+            rateLimitPerUser: data.rateLimitPerUser || prev.rateLimitPerUser
+          }));
+        }
+      })
+      .catch(err => console.error("Failed to load settings from Worker:", err));
+  }, [workerBaseUrl]);
+
+  // Load users and logs periodically from the Worker API
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const apiBase = workerBaseUrl.replace(/\/$/, '');
+    if (workerBaseUrl.includes('your-subdomain')) return;
+
+    const fetchData = () => {
+      fetch(`${apiBase}/api/users`)
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) {
+            setUsers(data);
+          }
+        })
+        .catch(err => console.error("Failed to load users from Worker:", err));
+
+      fetch(`${apiBase}/api/logs`)
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) {
+            setDnsLogs(data);
+          }
+        })
+        .catch(err => console.error("Failed to load logs from Worker:", err));
+    };
+
+    fetchData();
+    const interval = setInterval(fetchData, 8000); // refresh every 8 seconds
+    return () => clearInterval(interval);
+  }, [isAuthenticated, workerBaseUrl]);
 
   // Search, Filter and Sorting State for Users Management
   const [userSearchQuery, setUserSearchQuery] = useState('');
@@ -178,6 +238,13 @@ export default function App() {
   const handleDeleteUser = (id: string) => {
     if (window.confirm('Are you sure you want to permanently delete this client profile?')) {
       setUsers(prev => prev.filter(u => u.id !== id));
+      
+      const apiBase = workerBaseUrl.replace(/\/$/, '');
+      if (!workerBaseUrl.includes('your-subdomain')) {
+        fetch(`${apiBase}/api/users?id=${encodeURIComponent(id)}`, {
+          method: 'DELETE'
+        }).catch(err => console.error("Failed to delete user on Worker D1:", err));
+      }
     }
   };
 
@@ -191,19 +258,70 @@ export default function App() {
       }
     });
     setIsUserModalOpen(false);
+
+    const apiBase = workerBaseUrl.replace(/\/$/, '');
+    if (!workerBaseUrl.includes('your-subdomain')) {
+      fetch(`${apiBase}/api/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(savedUser)
+      }).catch(err => console.error("Failed to save user to Worker D1:", err));
+    }
   };
 
   const handleToggleStatus = (id: string, currentStatus: 'active' | 'suspended' | 'disabled') => {
     const nextStatus = currentStatus === 'active' ? 'suspended' : 'active';
-    setUsers(prev => prev.map(u => u.id === id ? { ...u, status: nextStatus } : u));
+    setUsers(prev => prev.map(u => {
+      if (u.id === id) {
+        const updated = { ...u, status: nextStatus };
+        const apiBase = workerBaseUrl.replace(/\/$/, '');
+        if (!workerBaseUrl.includes('your-subdomain')) {
+          fetch(`${apiBase}/api/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updated)
+          }).catch(err => console.error("Failed to toggle user status on Worker D1:", err));
+        }
+        return updated;
+      }
+      return u;
+    }));
   };
 
   const handleResetTraffic = (id: string) => {
-    setUsers(prev => prev.map(u => u.id === id ? { ...u, consumedTraffic: 0 } : u));
+    setUsers(prev => prev.map(u => {
+      if (u.id === id) {
+        const updated = { ...u, consumedTraffic: 0 };
+        const apiBase = workerBaseUrl.replace(/\/$/, '');
+        if (!workerBaseUrl.includes('your-subdomain')) {
+          fetch(`${apiBase}/api/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updated)
+          }).catch(err => console.error("Failed to reset traffic on Worker D1:", err));
+        }
+        return updated;
+      }
+      return u;
+    }));
   };
 
   const handleResetExpiration = (id: string) => {
-    setUsers(prev => prev.map(u => u.id === id ? { ...u, unlimitedTime: true, expireDate: '' } : u));
+    setUsers(prev => prev.map(u => {
+      if (u.id === id) {
+        const updated = { ...u, unlimitedTime: true, expireDate: '' };
+        const apiBase = workerBaseUrl.replace(/\/$/, '');
+        if (!workerBaseUrl.includes('your-subdomain')) {
+          fetch(`${apiBase}/api/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updated)
+          }).catch(err => console.error("Failed to reset expiration on Worker D1:", err));
+        }
+        return updated;
+      }
+      return u;
+    }));
   };
 
   // Export Users JSON File Action
@@ -856,7 +974,21 @@ export default function App() {
 
                 <div className="flex items-center justify-end border-t border-[#262626] pt-4">
                   <button
-                    onClick={() => alert('Settings successfully persisted to Workers KV store.')}
+                    onClick={() => {
+                      const apiBase = workerBaseUrl.replace(/\/$/, '');
+                      if (!workerBaseUrl.includes('your-subdomain')) {
+                        fetch(`${apiBase}/api/system`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify(systemConfig)
+                        })
+                        .then(res => res.json())
+                        .then(() => alert('Settings successfully persisted to Workers D1 Database.'))
+                        .catch(err => alert('Failed to persist settings: ' + err.message));
+                      } else {
+                        alert('Settings saved locally (Worker URL not configured).');
+                      }
+                    }}
                     className="px-4 py-1.5 text-[11px] font-bold font-mono text-black bg-[#f38020] hover:bg-[#e27216] rounded transition-colors"
                   >
                     SAVE CHANGES

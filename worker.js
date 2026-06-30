@@ -317,6 +317,188 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // API route check FIRST
+    if (url.pathname.startsWith('/api/')) {
+      // Handle OPTIONS for API CORS
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization',
+            'Access-Control-Max-Age': '86400',
+          }
+        });
+      }
+
+      const corsHeaders = {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization',
+      };
+
+      try {
+        // 1. GET /api/users
+        if (url.pathname === '/api/users' && request.method === 'GET') {
+          if (env.DB) {
+            const { results } = await env.DB.prepare("SELECT * FROM users").all();
+            const mapped = results.map(dbUser => ({
+              id: dbUser.id,
+              uuid: dbUser.uuid,
+              apiToken: dbUser.api_token,
+              username: dbUser.username,
+              displayName: dbUser.display_name,
+              description: dbUser.description,
+              createdDate: dbUser.created_date,
+              expireDate: dbUser.expire_date,
+              trafficLimit: dbUser.traffic_limit,
+              consumedTraffic: dbUser.consumed_traffic,
+              unlimitedTraffic: dbUser.unlimited_traffic === 1,
+              unlimitedTime: dbUser.unlimited_time === 1,
+              status: dbUser.status,
+              allowedUpstreams: dbUser.allowed_upstreams ? dbUser.allowed_upstreams.split(',') : [],
+              allowedDomains: dbUser.allowed_domains ? dbUser.allowed_domains.split(',') : [],
+              maxRpm: dbUser.max_rpm,
+              maxConcurrent: dbUser.max_concurrent,
+              lastLogin: dbUser.last_login,
+              lastRequest: dbUser.last_request,
+              country: dbUser.country,
+              notes: dbUser.notes
+            }));
+            return new Response(JSON.stringify(mapped), { headers: corsHeaders });
+          } else {
+            return new Response(JSON.stringify(STATIC_USERS), { headers: corsHeaders });
+          }
+        }
+
+        // 2. POST /api/users (Create or Update)
+        if (url.pathname === '/api/users' && request.method === 'POST') {
+          const body = await request.json();
+          if (env.DB) {
+            const existing = await env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(body.id).first();
+            
+            const allowedUpstreams = Array.isArray(body.allowedUpstreams) ? body.allowedUpstreams.join(',') : '';
+            const allowedDomains = Array.isArray(body.allowedDomains) ? body.allowedDomains.join(',') : '*';
+
+            if (existing) {
+              await env.DB.prepare(`
+                UPDATE users SET 
+                  uuid = ?, api_token = ?, username = ?, display_name = ?, description = ?, 
+                  expire_date = ?, traffic_limit = ?, consumed_traffic = ?, unlimited_traffic = ?, unlimited_time = ?, 
+                  status = ?, allowed_upstreams = ?, allowed_domains = ?, max_rpm = ?, max_concurrent = ?, 
+                  notes = ?
+                WHERE id = ?
+              `).bind(
+                body.uuid, body.apiToken, body.username, body.displayName, body.description,
+                body.expireDate || null, body.trafficLimit || 0, body.consumedTraffic || 0, body.unlimitedTraffic ? 1 : 0, body.unlimitedTime ? 1 : 0,
+                body.status || 'active', allowedUpstreams, allowedDomains, body.maxRpm || 120, body.maxConcurrent || 5,
+                body.notes || null, body.id
+              ).run();
+            } else {
+              await env.DB.prepare(`
+                INSERT INTO users (
+                  id, uuid, api_token, username, display_name, description, created_date,
+                  expire_date, traffic_limit, consumed_traffic, unlimited_traffic, unlimited_time,
+                  status, allowed_upstreams, allowed_domains, max_rpm, max_concurrent, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).bind(
+                body.id, body.uuid, body.apiToken, body.username, body.displayName, body.description, body.createdDate || new Date().toISOString(),
+                body.expireDate || null, body.trafficLimit || 0, body.consumedTraffic || 0, body.unlimitedTraffic ? 1 : 0, body.unlimitedTime ? 1 : 0,
+                body.status || 'active', allowedUpstreams, allowedDomains, body.maxRpm || 120, body.maxConcurrent || 5, body.notes || null
+              ).run();
+            }
+            return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+          } else {
+            return new Response(JSON.stringify({ success: true, warning: "DB_MISSING" }), { headers: corsHeaders });
+          }
+        }
+
+        // 3. DELETE /api/users
+        if (url.pathname === '/api/users' && request.method === 'DELETE') {
+          const id = url.searchParams.get('id');
+          if (!id) {
+            return new Response(JSON.stringify({ success: false, error: 'Missing user id' }), { status: 400, headers: corsHeaders });
+          }
+          if (env.DB) {
+            await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id).run();
+            return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+          } else {
+            return new Response(JSON.stringify({ success: true, warning: "DB_MISSING" }), { headers: corsHeaders });
+          }
+        }
+
+        // 4. GET /api/logs
+        if (url.pathname === '/api/logs' && request.method === 'GET') {
+          if (env.DB) {
+            const { results } = await env.DB.prepare("SELECT * FROM dns_logs ORDER BY timestamp DESC LIMIT 200").all();
+            const mapped = results.map(log => ({
+              id: log.id,
+              timestamp: log.timestamp,
+              userId: log.user_id,
+              username: log.username,
+              clientIp: log.client_ip,
+              country: log.country,
+              domain: log.domain,
+              type: log.type,
+              reqSize: log.req_size,
+              resSize: log.res_size,
+              duration: log.duration,
+              status: log.status,
+              upstream: log.upstream,
+              cacheHit: log.cache_hit === 1
+            }));
+            return new Response(JSON.stringify(mapped), { headers: corsHeaders });
+          } else {
+            return new Response(JSON.stringify([]), { headers: corsHeaders });
+          }
+        }
+
+        // 5. GET /api/system
+        if (url.pathname === '/api/system' && request.method === 'GET') {
+          let adminPasswordHash = 'admin123';
+          let defaultUpstream = 'cf-main';
+          let cacheTtl = 300;
+          let rateLimitPerUser = 120;
+
+          if (env.DB) {
+            const results = await env.DB.prepare("SELECT key, value FROM settings").all();
+            for (const row of results.results) {
+              if (row.key === 'admin_password') adminPasswordHash = row.value;
+              if (row.key === 'default_upstream') defaultUpstream = row.value;
+              if (row.key === 'cache_ttl') cacheTtl = parseInt(row.value) || 300;
+              if (row.key === 'rate_limit_user') rateLimitPerUser = parseInt(row.value) || 120;
+            }
+          }
+          return new Response(JSON.stringify({ adminPasswordHash, defaultUpstream, cacheTtl, rateLimitPerUser }), { headers: corsHeaders });
+        }
+
+        // 6. POST /api/system
+        if (url.pathname === '/api/system' && request.method === 'POST') {
+          const body = await request.json();
+          if (env.DB) {
+            if (body.adminPasswordHash) {
+              await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_password', ?)").bind(body.adminPasswordHash).run();
+            }
+            if (body.defaultUpstream) {
+              await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('default_upstream', ?)").bind(body.defaultUpstream).run();
+            }
+            if (body.cacheTtl !== undefined) {
+              await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cache_ttl', ?)").bind(String(body.cacheTtl)).run();
+            }
+            if (body.rateLimitPerUser !== undefined) {
+              await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('rate_limit_user', ?)").bind(String(body.rateLimitPerUser)).run();
+            }
+          }
+          return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+        }
+
+        return new Response(JSON.stringify({ error: 'Endpoint not found' }), { status: 404, headers: corsHeaders });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
+      }
+    }
+
     // Route check: /dns-query
     if (!url.pathname.startsWith('/dns-query')) {
       if (env.ASSETS) {
