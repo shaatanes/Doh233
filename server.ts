@@ -10,17 +10,27 @@ async function startServer() {
   // Support raw body parsed buffer for all content types under /dns-query path
   app.use(/^\/dns-query(\/.*)?$/, express.raw({ type: '*/*', limit: '10mb' }));
 
-  // Static Upstream Endpoints mapping
+  // Static Upstream Endpoints mapping - changed default to 1.1.1.1 to avoid CF loop blocks
   const UPSTREAM_URLS: Record<string, string> = {
-    'cf-main': 'https://cloudflare-dns.com/dns-query',
+    'cf-main': 'https://1.1.1.1/dns-query',
     'google-dns': 'https://dns.google/dns-query',
     'quad9-secure': 'https://dns.quad9.net/dns-query',
     'adguard-dns': 'https://dns.adguard-dns.com/dns-query'
   };
 
+  // In-memory persistent data stores for local simulation
+  const localLogs: any[] = [];
+  const localUsersList = [...INITIAL_USERS];
+  let localSettings = {
+    adminPasswordHash: 'admin123',
+    defaultUpstream: 'cf-main',
+    cacheTtl: 300,
+    rateLimitPerUser: 120
+  };
+
   // In-memory traffic store initialized with existing quotas
   const userTrafficStore = new Map<string, number>();
-  for (const u of INITIAL_USERS) {
+  for (const u of localUsersList) {
     userTrafficStore.set(u.id, u.consumedTraffic);
   }
 
@@ -201,6 +211,66 @@ async function startServer() {
     return true;
   }
 
+  // --- ADMIN REST API ENDPOINTS ---
+
+  app.get("/api/system", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json(localSettings);
+  });
+
+  app.post("/api/system", express.json(), (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    localSettings = {
+      ...localSettings,
+      ...req.body
+    };
+    res.json({ success: true });
+  });
+
+  app.get("/api/users", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const mappedUsers = localUsersList.map(u => ({
+      ...u,
+      consumedTraffic: userTrafficStore.get(u.id) || 0
+    }));
+    res.json(mappedUsers);
+  });
+
+  app.post("/api/users", express.json(), (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const savedUser = req.body;
+    const idx = localUsersList.findIndex(u => u.id === savedUser.id);
+    if (idx >= 0) {
+      localUsersList[idx] = savedUser;
+    } else {
+      localUsersList.push(savedUser);
+    }
+    userTrafficStore.set(savedUser.id, savedUser.consumedTraffic || 0);
+    res.json({ success: true });
+  });
+
+  app.delete("/api/users", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const id = req.query.id;
+    if (typeof id === 'string') {
+      const idx = localUsersList.findIndex(u => u.id === id);
+      if (idx >= 0) {
+        localUsersList.splice(idx, 1);
+      }
+      userTrafficStore.delete(id);
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ error: "Missing id" });
+    }
+  });
+
+  app.get("/api/logs", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json(localLogs);
+  });
+
+  // --- DNS OVER HTTPS (DoH) RESOLVER PATH ---
+
   app.all(/^\/dns-query(\/.*)?$/, async (req, res) => {
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -217,7 +287,7 @@ async function startServer() {
       const token = getAuthToken(req);
       let user = null;
       if (token) {
-        user = INITIAL_USERS.find(u => 
+        user = localUsersList.find(u => 
           u.apiToken === token || 
           u.uuid === token || 
           u.id === token || 
@@ -288,7 +358,18 @@ async function startServer() {
           }
         }
 
-        // C. Allowed Domains glob whitelist check
+        // C. Expiration check
+        if (!user.unlimitedTime && user.expireDate) {
+          const expiry = new Date(user.expireDate);
+          if (expiry.getTime() < Date.now()) {
+            const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
+            res.setHeader('Content-Type', 'application/dns-message');
+            res.send(errResponse);
+            return;
+          }
+        }
+
+        // D. Allowed Domains glob whitelist check
         if (domainName && !isDomainAllowed(domainName, user.allowedDomains)) {
           const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
           res.setHeader('Content-Type', 'application/dns-message');
@@ -296,8 +377,9 @@ async function startServer() {
           return;
         }
 
-        // D. Rate limits
-        if (!checkRateLimit(token!, user.maxRpm)) {
+        // E. Rate limits
+        const userMaxRpm = user.maxRpm || localSettings.rateLimitPerUser || 120;
+        if (!checkRateLimit(token!, userMaxRpm)) {
           const errResponse = buildDnsErrorResponse(dnsPacket, 2); // SERVFAIL
           res.setHeader('Content-Type', 'application/dns-message');
           res.send(errResponse);
@@ -307,7 +389,6 @@ async function startServer() {
 
       // 4. Upstream DNS Resolver Selection
       let upstreamId = req.query.upstream || req.headers['x-upstream-id'];
-      let selectedUpstreamUrl = UPSTREAM_URLS['cf-main']; // default fallback
 
       const isValidUrl = (u: any): boolean => {
         if (!u || typeof u !== 'string') return false;
@@ -319,35 +400,38 @@ async function startServer() {
         }
       };
 
+      const getUpstreamUrl = (idOrUrl: any): string | null => {
+        if (isValidUrl(idOrUrl)) return idOrUrl;
+        if (UPSTREAM_URLS[idOrUrl]) return UPSTREAM_URLS[idOrUrl];
+        return null;
+      };
+
+      // Set default upstream to system settings default
+      const defaultUpstreamUrl = getUpstreamUrl(localSettings.defaultUpstream) || UPSTREAM_URLS['cf-main'];
+      let selectedUpstreamUrl = defaultUpstreamUrl;
+
       if (user) {
         if (upstreamId && typeof upstreamId === 'string') {
           // If the user specifies an upstream, check if they are allowed to use it
-          if (user.allowedUpstreams.includes(upstreamId)) {
-            if (isValidUrl(upstreamId)) {
-              selectedUpstreamUrl = upstreamId;
-            } else if (UPSTREAM_URLS[upstreamId]) {
-              selectedUpstreamUrl = UPSTREAM_URLS[upstreamId];
-            }
+          if (user.allowedUpstreams && user.allowedUpstreams.includes(upstreamId)) {
+            const mapped = getUpstreamUrl(upstreamId);
+            if (mapped) selectedUpstreamUrl = mapped;
           }
         }
         
         // If selectedUpstreamUrl is still the default fallback or is invalid, use their first allowed upstream
-        if ((selectedUpstreamUrl === UPSTREAM_URLS['cf-main']) && user.allowedUpstreams && user.allowedUpstreams.length > 0) {
-          const primaryUpstream = user.allowedUpstreams[0];
-          if (isValidUrl(primaryUpstream)) {
-            selectedUpstreamUrl = primaryUpstream;
-          } else if (UPSTREAM_URLS[primaryUpstream]) {
-            selectedUpstreamUrl = UPSTREAM_URLS[primaryUpstream];
+        if (selectedUpstreamUrl === defaultUpstreamUrl) {
+          if (user.allowedUpstreams && user.allowedUpstreams.length > 0) {
+            const primaryUpstream = user.allowedUpstreams[0];
+            const mapped = getUpstreamUrl(primaryUpstream);
+            if (mapped) selectedUpstreamUrl = mapped;
           }
         }
       } else {
         // Public/default requests
         if (upstreamId && typeof upstreamId === 'string') {
-          if (isValidUrl(upstreamId)) {
-            selectedUpstreamUrl = upstreamId;
-          } else if (UPSTREAM_URLS[upstreamId]) {
-            selectedUpstreamUrl = UPSTREAM_URLS[upstreamId];
-          }
+          const mapped = getUpstreamUrl(upstreamId);
+          if (mapped) selectedUpstreamUrl = mapped;
         }
       }
 
@@ -356,17 +440,44 @@ async function startServer() {
         selectedUpstreamUrl = UPSTREAM_URLS['cf-main'];
       }
 
-      // 5. Forward binary request to target upstream
-      const upstreamResponse = await fetch(selectedUpstreamUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/dns-message',
-          'Accept': 'application/dns-message'
-        },
-        body: dnsPacket
-      });
+      // 5. Forward binary request to target upstream with Automatic Failover
+      const upstreamsToTry = [selectedUpstreamUrl];
+      if (selectedUpstreamUrl !== UPSTREAM_URLS['google-dns']) {
+        upstreamsToTry.push(UPSTREAM_URLS['google-dns']);
+      }
+      if (selectedUpstreamUrl !== UPSTREAM_URLS['cf-main']) {
+        upstreamsToTry.push(UPSTREAM_URLS['cf-main']);
+      }
+      if (selectedUpstreamUrl !== UPSTREAM_URLS['quad9-secure']) {
+        upstreamsToTry.push(UPSTREAM_URLS['quad9-secure']);
+      }
 
-      if (!upstreamResponse.ok) {
+      let upstreamResponse = null;
+      let success = false;
+      const startTime = Date.now();
+
+      for (const upstreamUrl of upstreamsToTry) {
+        try {
+          const res = await fetch(upstreamUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/dns-message',
+              'Accept': 'application/dns-message'
+            },
+            body: dnsPacket
+          });
+          if (res.ok) {
+            upstreamResponse = res;
+            success = true;
+            selectedUpstreamUrl = upstreamUrl;
+            break;
+          }
+        } catch (err) {
+          console.error(`Local Dev upstream failover trying next. Error fetching ${upstreamUrl}:`, err);
+        }
+      }
+
+      if (!success || !upstreamResponse) {
         const errResponse = buildDnsErrorResponse(dnsPacket, 2); // SERVFAIL
         res.setHeader('Content-Type', 'application/dns-message');
         res.send(errResponse);
@@ -375,14 +486,37 @@ async function startServer() {
 
       const arrayBuffer = await upstreamResponse.arrayBuffer();
       const responseBuffer = Buffer.from(arrayBuffer);
+      const duration = Date.now() - startTime;
 
-      // 6. Track consumed bandwidth stats
+      // 6. Track consumed bandwidth stats & record logs in local dev
       if (user) {
         const totalBytes = dnsPacket.length + responseBuffer.length;
         const currentTraffic = userTrafficStore.get(user.id) || 0;
         const newTraffic = currentTraffic + totalBytes;
         userTrafficStore.set(user.id, newTraffic);
         user.consumedTraffic = newTraffic; // Sync live stats on user profile
+        user.lastRequest = new Date().toISOString();
+
+        // Push real-time DNS transactions log for query log viewer simulation
+        const logId = 'log_' + Math.random().toString(36).substring(2, 15);
+        const newLog = {
+          id: logId,
+          timestamp: new Date().toISOString(),
+          userId: user.id,
+          username: user.username,
+          clientIp: req.ip || '127.0.0.1',
+          country: 'US',
+          domain: domainName || 'unknown',
+          type: qType,
+          reqSize: dnsPacket.length,
+          resSize: responseBuffer.length,
+          duration,
+          status: 200,
+          upstream: selectedUpstreamUrl,
+          cacheHit: false
+        };
+        localLogs.unshift(newLog);
+        if (localLogs.length > 100) localLogs.pop();
       }
 
       // 7. Send binary DNS answer packet
@@ -390,7 +524,6 @@ async function startServer() {
       res.send(responseBuffer);
     } catch (error) {
       console.error('DoH forwarding error:', error);
-      // Ensure we ALWAYS return a valid DNS response on unexpected exceptions
       const errResponse = buildDnsErrorResponse(null, 2); // SERVFAIL
       res.setHeader('Content-Type', 'application/dns-message');
       res.send(errResponse);
