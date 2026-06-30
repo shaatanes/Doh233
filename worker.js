@@ -319,6 +319,19 @@ export default {
 
     // Route check: /dns-query
     if (!url.pathname.startsWith('/dns-query')) {
+      if (env.ASSETS) {
+        try {
+          let response = await env.ASSETS.fetch(request);
+          // SPA Fallback: If not found and accepts HTML, serve index.html
+          if (response.status === 404 && request.headers.get("accept")?.includes("text/html")) {
+            const fallbackRequest = new Request(new URL("/index.html", request.url), request);
+            response = await env.ASSETS.fetch(fallbackRequest);
+          }
+          return response;
+        } catch (assetsErr) {
+          return new Response(`Assets error: ${assetsErr.message}`, { status: 500 });
+        }
+      }
       return new Response('Not Found', { status: 404 });
     }
 

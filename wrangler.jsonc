@@ -3,6 +3,10 @@
   "name": "cf-dns-over-https",
   "main": "worker.js",
   "compatibility_date": "2024-03-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
   "vars": {
     "ADMIN_SESSION_TTL": 86400
   },
@@ -10,13 +14,13 @@
     {
       "binding": "DB",
       "database_name": "cf-doh-db",
-      "database_id": "89098686-a6d3-4147-9914-338c3d497ad8"
+      "database_id": "<YOUR_DB_ID>"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "DOH_KV",
-      "id": "3511d31302f04b7db428b5aea55653da"
+      "id": "<YOUR_KV_ID>"
     }
   ]
 }
