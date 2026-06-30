@@ -84,9 +84,15 @@ async function startServer() {
     if (!packet || packet.length < 12) return "";
     let offset = 12;
     const parts: string[] = [];
-    while (offset < packet.length) {
+    let iterations = 0;
+    while (offset < packet.length && iterations < 128) {
+      iterations++;
       const len = packet[offset];
       if (len === 0) {
+        break;
+      }
+      // Check for compression pointer (starts with 11xxxxxx, i.e. >= 192)
+      if ((len & 0xc0) === 0xc0) {
         break;
       }
       if (offset + 1 + len > packet.length) {
@@ -238,9 +244,13 @@ async function startServer() {
         
         if (!dnsPacket && name && typeof name === 'string') {
           const typeStr = typeof type === 'string' ? type : 'A';
-          dnsPacket = buildDnsQuery(name, typeStr);
-          domainName = name;
-          qType = typeStr.toUpperCase();
+          try {
+            dnsPacket = buildDnsQuery(name, typeStr);
+            domainName = name;
+            qType = typeStr.toUpperCase();
+          } catch (e) {
+            // building query failed
+          }
         }
       } else if (req.method === 'POST') {
         if (Buffer.isBuffer(req.body) && req.body.length > 0) {
@@ -299,16 +309,51 @@ async function startServer() {
       let upstreamId = req.query.upstream || req.headers['x-upstream-id'];
       let selectedUpstreamUrl = UPSTREAM_URLS['cf-main']; // default fallback
 
+      const isValidUrl = (u: any): boolean => {
+        if (!u || typeof u !== 'string') return false;
+        try {
+          const parsed = new URL(u);
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch (e) {
+          return false;
+        }
+      };
+
       if (user) {
-        if (upstreamId && typeof upstreamId === 'string' && user.allowedUpstreams.includes(upstreamId)) {
-          selectedUpstreamUrl = UPSTREAM_URLS[upstreamId] || UPSTREAM_URLS['cf-main'];
-        } else if (user.allowedUpstreams && user.allowedUpstreams.length > 0) {
-          selectedUpstreamUrl = UPSTREAM_URLS[user.allowedUpstreams[0]] || UPSTREAM_URLS['cf-main'];
+        if (upstreamId && typeof upstreamId === 'string') {
+          // If the user specifies an upstream, check if they are allowed to use it
+          if (user.allowedUpstreams.includes(upstreamId)) {
+            if (isValidUrl(upstreamId)) {
+              selectedUpstreamUrl = upstreamId;
+            } else if (UPSTREAM_URLS[upstreamId]) {
+              selectedUpstreamUrl = UPSTREAM_URLS[upstreamId];
+            }
+          }
+        }
+        
+        // If selectedUpstreamUrl is still the default fallback or is invalid, use their first allowed upstream
+        if ((selectedUpstreamUrl === UPSTREAM_URLS['cf-main']) && user.allowedUpstreams && user.allowedUpstreams.length > 0) {
+          const primaryUpstream = user.allowedUpstreams[0];
+          if (isValidUrl(primaryUpstream)) {
+            selectedUpstreamUrl = primaryUpstream;
+          } else if (UPSTREAM_URLS[primaryUpstream]) {
+            selectedUpstreamUrl = UPSTREAM_URLS[primaryUpstream];
+          }
         }
       } else {
-        if (upstreamId && typeof upstreamId === 'string' && UPSTREAM_URLS[upstreamId]) {
-          selectedUpstreamUrl = UPSTREAM_URLS[upstreamId];
+        // Public/default requests
+        if (upstreamId && typeof upstreamId === 'string') {
+          if (isValidUrl(upstreamId)) {
+            selectedUpstreamUrl = upstreamId;
+          } else if (UPSTREAM_URLS[upstreamId]) {
+            selectedUpstreamUrl = UPSTREAM_URLS[upstreamId];
+          }
         }
+      }
+
+      // Final safety guarantee
+      if (!isValidUrl(selectedUpstreamUrl)) {
+        selectedUpstreamUrl = UPSTREAM_URLS['cf-main'];
       }
 
       // 5. Forward binary request to target upstream

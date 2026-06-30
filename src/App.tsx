@@ -20,7 +20,13 @@ import {
 
 export default function App() {
   // Session / Authentication state
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true); // Default logged in for interactive sandbox demo
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('cf_doh_admin_authenticated') === 'true';
+    } catch (e) {
+      return false;
+    }
+  });
   const [adminPasswordInput, setAdminPasswordInput] = useState<string>('');
   const [loginError, setLoginError] = useState<string>('');
 
@@ -87,6 +93,9 @@ export default function App() {
     if (adminPasswordInput === systemConfig.adminPasswordHash) {
       setIsAuthenticated(true);
       setLoginError('');
+      try {
+        localStorage.setItem('cf_doh_admin_authenticated', 'true');
+      } catch (err) {}
       // Log successful login
       const successLog: AuthLog = {
         id: 'a_' + Math.random().toString(36).substr(2, 9),
@@ -115,6 +124,9 @@ export default function App() {
   const handleLogout = () => {
     setIsAuthenticated(false);
     setAdminPasswordInput('');
+    try {
+      localStorage.removeItem('cf_doh_admin_authenticated');
+    } catch (err) {}
     const logoutLog: AuthLog = {
       id: 'a_' + Math.random().toString(36).substr(2, 9),
       timestamp: new Date().toISOString(),

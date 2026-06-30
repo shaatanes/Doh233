@@ -76,9 +76,15 @@ function parseDomainFromDnsPacket(packet) {
   let offset = 12;
   const parts = [];
   const decoder = new TextDecoder("ascii");
-  while (offset < packet.length) {
+  let iterations = 0;
+  while (offset < packet.length && iterations < 128) {
+    iterations++;
     const len = packet[offset];
     if (len === 0) {
+      break;
+    }
+    // Check for compression pointer (starts with 11xxxxxx, i.e. >= 192)
+    if ((len & 0xc0) === 0xc0) {
       break;
     }
     if (offset + 1 + len > packet.length) {
@@ -355,9 +361,13 @@ export default {
         }
         
         if (!dnsPacket && name) {
-          dnsPacket = buildDnsQuery(name, type || 'A');
-          domainName = name;
-          qType = (type || 'A').toUpperCase();
+          try {
+            dnsPacket = buildDnsQuery(name, type || 'A');
+            domainName = name;
+            qType = (type || 'A').toUpperCase();
+          } catch (e) {
+            // building query failed
+          }
         }
       } else if (request.method === 'POST') {
         const arrayBuffer = await request.arrayBuffer();
@@ -436,16 +446,51 @@ export default {
       let upstreamId = url.searchParams.get('upstream') || request.headers.get('x-upstream-id');
       let selectedUpstreamUrl = STATIC_UPSTREAMS['cf-main']; // default fallback
 
+      const isValidUrl = (u) => {
+        if (!u || typeof u !== 'string') return false;
+        try {
+          const parsed = new URL(u);
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+        } catch (e) {
+          return false;
+        }
+      };
+
       if (user) {
-        if (upstreamId && user.allowedUpstreams.includes(upstreamId)) {
-          selectedUpstreamUrl = STATIC_UPSTREAMS[upstreamId] || STATIC_UPSTREAMS['cf-main'];
-        } else if (user.allowedUpstreams && user.allowedUpstreams.length > 0) {
-          selectedUpstreamUrl = STATIC_UPSTREAMS[user.allowedUpstreams[0]] || STATIC_UPSTREAMS['cf-main'];
+        if (upstreamId && typeof upstreamId === 'string') {
+          // If the user specifies an upstream, check if they are allowed to use it
+          if (user.allowedUpstreams.includes(upstreamId)) {
+            if (isValidUrl(upstreamId)) {
+              selectedUpstreamUrl = upstreamId;
+            } else if (STATIC_UPSTREAMS[upstreamId]) {
+              selectedUpstreamUrl = STATIC_UPSTREAMS[upstreamId];
+            }
+          }
+        }
+        
+        // If selectedUpstreamUrl is still the default fallback or is invalid, use their first allowed upstream
+        if ((selectedUpstreamUrl === STATIC_UPSTREAMS['cf-main']) && user.allowedUpstreams && user.allowedUpstreams.length > 0) {
+          const primaryUpstream = user.allowedUpstreams[0];
+          if (isValidUrl(primaryUpstream)) {
+            selectedUpstreamUrl = primaryUpstream;
+          } else if (STATIC_UPSTREAMS[primaryUpstream]) {
+            selectedUpstreamUrl = STATIC_UPSTREAMS[primaryUpstream];
+          }
         }
       } else {
-        if (upstreamId && STATIC_UPSTREAMS[upstreamId]) {
-          selectedUpstreamUrl = STATIC_UPSTREAMS[upstreamId];
+        // Public/default requests
+        if (upstreamId && typeof upstreamId === 'string') {
+          if (isValidUrl(upstreamId)) {
+            selectedUpstreamUrl = upstreamId;
+          } else if (STATIC_UPSTREAMS[upstreamId]) {
+            selectedUpstreamUrl = STATIC_UPSTREAMS[upstreamId];
+          }
         }
+      }
+
+      // Final safety guarantee
+      if (!isValidUrl(selectedUpstreamUrl)) {
+        selectedUpstreamUrl = STATIC_UPSTREAMS['cf-main'];
       }
 
       // 5. Forward binary request to target upstream
