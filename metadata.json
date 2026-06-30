@@ -1,0 +1,6 @@
+{
+  "name": "Cloudflare Workers DNS over HTTPS Panel",
+  "description": "A comprehensive Cloudflare Workers DNS over HTTPS management dashboard, deployment coordinator, and real-time query simulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
