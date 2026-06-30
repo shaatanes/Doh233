@@ -158,6 +158,7 @@ export default function App() {
         return {
           ...u,
           consumedTraffic: u.consumedTraffic + newLog.reqSize + newLog.resSize,
+          dailyConsumedTraffic: (u.dailyConsumedTraffic || 0) + newLog.reqSize + newLog.resSize,
           lastRequest: new Date().toISOString()
         };
       }
@@ -291,7 +292,7 @@ export default function App() {
   const handleResetTraffic = (id: string) => {
     setUsers(prev => prev.map(u => {
       if (u.id === id) {
-        const updated = { ...u, consumedTraffic: 0 };
+        const updated = { ...u, consumedTraffic: 0, dailyConsumedTraffic: 0 };
         const apiBase = workerBaseUrl.replace(/\/$/, '');
         if (!workerBaseUrl.includes('your-subdomain')) {
           fetch(`${apiBase}/api/users`, {
@@ -740,17 +741,33 @@ export default function App() {
                                 </div>
                               </div>
                             </td>
-                            <td className="p-3">
-                              <div className="font-bold text-slate-300">
-                                {formatBytes(user.consumedTraffic)}
+                            <td className="p-3 space-y-1">
+                              <div className="flex items-center space-x-1.5">
+                                <span className="text-[9px] text-[#6b7280] font-mono uppercase">Total:</span>
+                                <span className="font-bold text-slate-300">{formatBytes(user.consumedTraffic)}</span>
+                                <span className="text-[10px] text-[#4b5563]">/ {user.unlimitedTraffic ? '∞' : formatBytes(user.trafficLimit)}</span>
                               </div>
-                              <div className="text-[10px] text-[#4b5563] mt-0.5">
-                                Limit: {user.unlimitedTraffic ? 'Unlimited' : formatBytes(user.trafficLimit)}
+                              <div className="flex items-center space-x-1.5">
+                                <span className="text-[9px] text-amber-500 font-mono uppercase">Daily:</span>
+                                <span className="font-bold text-amber-200">{formatBytes(user.dailyConsumedTraffic || 0)}</span>
+                                <span className="text-[10px] text-[#4b5563]">/ {user.dailyLimitEnabled ? formatBytes(user.dailyTrafficLimit) : '∞'}</span>
                               </div>
                             </td>
-                            <td className="p-3 space-y-0.5 text-[10px]">
-                              <div>Max RPM: <span className="font-bold text-slate-400">{user.maxRpm}</span></div>
-                              <div>Allowed domains: <span className="text-slate-500">{user.allowedDomains.join(', ')}</span></div>
+                            <td className="p-3 space-y-1 text-[10px]">
+                              <div>
+                                <span className="text-[#6b7280]">Expires: </span>
+                                {user.unlimitedTime ? (
+                                  <span className="font-bold text-green-400">Never / دائمی</span>
+                                ) : (
+                                  <span className={`font-bold ${new Date(user.expireDate).getTime() < Date.now() ? 'text-red-400 line-through' : 'text-amber-400'}`}>
+                                    {new Date(user.expireDate).toLocaleDateString()}
+                                  </span>
+                                )}
+                              </div>
+                              <div><span className="text-[#6b7280]">Max RPM: </span><span className="font-bold text-slate-400">{user.maxRpm}</span></div>
+                              <div className="truncate max-w-[140px] text-[9px] text-slate-500" title={user.allowedDomains.join(', ')}>
+                                Domains: {user.allowedDomains.join(', ')}
+                              </div>
                             </td>
                             <td className="p-3">
                               <button

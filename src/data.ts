@@ -20,6 +20,9 @@ export const INITIAL_USERS: User[] = [
     consumedTraffic: 4.8 * 1024 * 1024 * 1024, // 4.8 GB
     unlimitedTraffic: false,
     unlimitedTime: false,
+    dailyTrafficLimit: 1024 * 1024 * 1024, // 1 GB
+    dailyConsumedTraffic: 120 * 1024 * 1024, // 120 MB
+    dailyLimitEnabled: true,
     status: 'active',
     allowedUpstreams: ['cf-main', 'quad9-secure'],
     allowedDomains: ['*'],
@@ -43,6 +46,9 @@ export const INITIAL_USERS: User[] = [
     consumedTraffic: 98.2 * 1024 * 1024 * 1024, // 98.2 GB (Near limit!)
     unlimitedTraffic: false,
     unlimitedTime: false,
+    dailyTrafficLimit: 5 * 1024 * 1024 * 1024, // 5 GB
+    dailyConsumedTraffic: 1.2 * 1024 * 1024 * 1024, // 1.2 GB
+    dailyLimitEnabled: true,
     status: 'active',
     allowedUpstreams: ['cf-main', 'google-dns'],
     allowedDomains: ['*'],
@@ -66,6 +72,9 @@ export const INITIAL_USERS: User[] = [
     consumedTraffic: 215 * 1024 * 1024, // 215 MB
     unlimitedTraffic: true,
     unlimitedTime: true,
+    dailyTrafficLimit: 0,
+    dailyConsumedTraffic: 15 * 1024 * 1024,
+    dailyLimitEnabled: false,
     status: 'active',
     allowedUpstreams: ['cf-main', 'quad9-secure', 'adguard-dns'],
     allowedDomains: ['*'],
@@ -89,6 +98,9 @@ export const INITIAL_USERS: User[] = [
     consumedTraffic: 498 * 1024 * 1024,
     unlimitedTraffic: false,
     unlimitedTime: false,
+    dailyTrafficLimit: 100 * 1024 * 1024,
+    dailyConsumedTraffic: 98 * 1024 * 1024,
+    dailyLimitEnabled: true,
     status: 'suspended',
     allowedUpstreams: ['google-dns'],
     allowedDomains: ['*'],

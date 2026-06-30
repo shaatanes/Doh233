@@ -358,6 +358,25 @@ async function startServer() {
           }
         }
 
+        // B2. Daily Traffic Quota check
+        if (user.dailyLimitEnabled) {
+          // Check if last request was a different calendar day, reset daily consumed traffic if so
+          if (user.lastRequest) {
+            const lastReqDate = new Date(user.lastRequest).toDateString();
+            const todayDate = new Date().toDateString();
+            if (lastReqDate !== todayDate) {
+              user.dailyConsumedTraffic = 0;
+            }
+          }
+          const dailyTraffic = user.dailyConsumedTraffic || 0;
+          if (dailyTraffic >= user.dailyTrafficLimit) {
+            const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
+            res.setHeader('Content-Type', 'application/dns-message');
+            res.send(errResponse);
+            return;
+          }
+        }
+
         // C. Expiration check
         if (!user.unlimitedTime && user.expireDate) {
           const expiry = new Date(user.expireDate);
@@ -495,6 +514,7 @@ async function startServer() {
         const newTraffic = currentTraffic + totalBytes;
         userTrafficStore.set(user.id, newTraffic);
         user.consumedTraffic = newTraffic; // Sync live stats on user profile
+        user.dailyConsumedTraffic = (user.dailyConsumedTraffic || 0) + totalBytes;
         user.lastRequest = new Date().toISOString();
 
         // Push real-time DNS transactions log for query log viewer simulation

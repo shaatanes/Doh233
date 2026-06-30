@@ -401,6 +401,9 @@ export default {
               consumedTraffic: dbUser.consumed_traffic,
               unlimitedTraffic: dbUser.unlimited_traffic === 1,
               unlimitedTime: dbUser.unlimited_time === 1,
+              dailyTrafficLimit: dbUser.daily_traffic_limit || 0,
+              dailyConsumedTraffic: dbUser.daily_consumed_traffic || 0,
+              dailyLimitEnabled: dbUser.daily_limit_enabled === 1,
               status: dbUser.status,
               allowedUpstreams: dbUser.allowed_upstreams ? dbUser.allowed_upstreams.split(',') : [],
               allowedDomains: dbUser.allowed_domains ? dbUser.allowed_domains.split(',') : [],
@@ -433,25 +436,27 @@ export default {
                   uuid = ?, api_token = ?, username = ?, display_name = ?, description = ?, 
                   expire_date = ?, traffic_limit = ?, consumed_traffic = ?, unlimited_traffic = ?, unlimited_time = ?, 
                   status = ?, allowed_upstreams = ?, allowed_domains = ?, max_rpm = ?, max_concurrent = ?, 
-                  notes = ?
+                  daily_traffic_limit = ?, daily_consumed_traffic = ?, daily_limit_enabled = ?, notes = ?
                 WHERE id = ?
               `).bind(
                 body.uuid, body.apiToken, body.username, body.displayName, body.description,
                 body.expireDate || null, body.trafficLimit || 0, body.consumedTraffic || 0, body.unlimitedTraffic ? 1 : 0, body.unlimitedTime ? 1 : 0,
                 body.status || 'active', allowedUpstreams, allowedDomains, body.maxRpm || 120, body.maxConcurrent || 5,
-                body.notes || null, body.id
+                body.dailyTrafficLimit || 0, body.dailyConsumedTraffic || 0, body.dailyLimitEnabled ? 1 : 0, body.notes || null, body.id
               ).run();
             } else {
               await env.DB.prepare(`
                 INSERT INTO users (
                   id, uuid, api_token, username, display_name, description, created_date,
                   expire_date, traffic_limit, consumed_traffic, unlimited_traffic, unlimited_time,
-                  status, allowed_upstreams, allowed_domains, max_rpm, max_concurrent, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  status, allowed_upstreams, allowed_domains, max_rpm, max_concurrent, 
+                  daily_traffic_limit, daily_consumed_traffic, daily_limit_enabled, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).bind(
                 body.id, body.uuid, body.apiToken, body.username, body.displayName, body.description, body.createdDate || new Date().toISOString(),
                 body.expireDate || null, body.trafficLimit || 0, body.consumedTraffic || 0, body.unlimitedTraffic ? 1 : 0, body.unlimitedTime ? 1 : 0,
-                body.status || 'active', allowedUpstreams, allowedDomains, body.maxRpm || 120, body.maxConcurrent || 5, body.notes || null
+                body.status || 'active', allowedUpstreams, allowedDomains, body.maxRpm || 120, body.maxConcurrent || 5,
+                body.dailyTrafficLimit || 0, body.dailyConsumedTraffic || 0, body.dailyLimitEnabled ? 1 : 0, body.notes || null
               ).run();
             }
             return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
@@ -664,6 +669,9 @@ export default {
                 consumedTraffic: dbUser.consumed_traffic,
                 unlimitedTraffic: dbUser.unlimited_traffic === 1,
                 unlimitedTime: dbUser.unlimited_time === 1,
+                dailyTrafficLimit: dbUser.daily_traffic_limit || 0,
+                dailyConsumedTraffic: dbUser.daily_consumed_traffic || 0,
+                dailyLimitEnabled: dbUser.daily_limit_enabled === 1,
                 status: dbUser.status,
                 allowedUpstreams: dbUser.allowed_upstreams ? dbUser.allowed_upstreams.split(',') : [],
                 allowedDomains: dbUser.allowed_domains ? dbUser.allowed_domains.split(',') : [],
@@ -767,6 +775,34 @@ export default {
         // B. Traffic Quota check
         if (!user.unlimitedTraffic) {
           if (user.consumedTraffic >= user.trafficLimit) {
+            const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
+            return new Response(errResponse, {
+              status: 200,
+              headers: {
+                'Content-Type': 'application/dns-message',
+                'Access-Control-Allow-Origin': '*'
+              }
+            });
+          }
+        }
+
+        // B2. Daily Traffic Quota check
+        if (user.dailyLimitEnabled) {
+          // Check if last request was a different calendar day, reset daily consumed traffic if so
+          if (user.lastRequest) {
+            const lastReqDate = new Date(user.lastRequest).toDateString();
+            const todayDate = new Date().toDateString();
+            if (lastReqDate !== todayDate) {
+              user.dailyConsumedTraffic = 0;
+              if (env.DB) {
+                try {
+                  ctx.waitUntil(env.DB.prepare("UPDATE users SET daily_consumed_traffic = 0 WHERE id = ?").bind(user.id).run());
+                } catch (e) {}
+              }
+            }
+          }
+          const dailyTraffic = user.dailyConsumedTraffic || 0;
+          if (dailyTraffic >= user.dailyTrafficLimit) {
             const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
             return new Response(errResponse, {
               status: 200,
@@ -962,6 +998,7 @@ export default {
       if (user) {
         const totalBytes = dnsPacket.length + responseBody.byteLength;
         user.consumedTraffic = (user.consumedTraffic || 0) + totalBytes; // Update in-memory
+        user.dailyConsumedTraffic = (user.dailyConsumedTraffic || 0) + totalBytes; // Update in-memory
         
         const logId = 'log_' + Math.random().toString(36).substring(2, 15);
         const clientIp = request.headers.get('cf-connecting-ip') || '127.0.0.1';
@@ -971,8 +1008,8 @@ export default {
         if (env.DB) {
           try {
             await env.DB.prepare(
-              "UPDATE users SET consumed_traffic = consumed_traffic + ?, last_request = ? WHERE id = ?"
-            ).bind(totalBytes, timestamp, user.id).run();
+              "UPDATE users SET consumed_traffic = consumed_traffic + ?, daily_consumed_traffic = daily_consumed_traffic + ?, last_request = ? WHERE id = ?"
+            ).bind(totalBytes, totalBytes, timestamp, user.id).run();
 
             await env.DB.prepare(
               "INSERT INTO dns_logs (id, timestamp, user_id, username, client_ip, country, domain, type, req_size, res_size, duration, status, upstream, cache_hit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1002,6 +1039,7 @@ export default {
             const idx = kvUsers.findIndex(u => u.id === user.id);
             if (idx >= 0) {
               kvUsers[idx].consumedTraffic = (kvUsers[idx].consumedTraffic || 0) + totalBytes;
+              kvUsers[idx].dailyConsumedTraffic = (kvUsers[idx].dailyConsumedTraffic || 0) + totalBytes;
               kvUsers[idx].lastRequest = timestamp;
               await saveKVUsers(env, kvUsers);
             }

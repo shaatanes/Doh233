@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS users (
   consumed_traffic INTEGER DEFAULT 0, -- in bytes
   unlimited_traffic INTEGER DEFAULT 0, -- 1=true, 0=false
   unlimited_time INTEGER DEFAULT 1, -- 1=true, 0=false
+  daily_traffic_limit INTEGER DEFAULT 0, -- in bytes
+  daily_consumed_traffic INTEGER DEFAULT 0, -- in bytes
+  daily_limit_enabled INTEGER DEFAULT 0, -- 1=true, 0=false
   status TEXT DEFAULT 'active', -- active, suspended, disabled
   allowed_upstreams TEXT, -- comma-separated upstream IDs
   allowed_domains TEXT DEFAULT '*', -- comma-separated domains

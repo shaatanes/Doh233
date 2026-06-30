@@ -16,6 +16,9 @@ export interface User {
   consumedTraffic: number; // in bytes
   unlimitedTraffic: boolean;
   unlimitedTime: boolean;
+  dailyTrafficLimit: number; // in bytes (0 means unlimited)
+  dailyConsumedTraffic: number; // in bytes
+  dailyLimitEnabled: boolean;
   status: 'active' | 'suspended' | 'disabled';
   allowedUpstreams: string[]; // List of upstream IDs
   allowedDomains: string[]; // List of glob or regex patterns
