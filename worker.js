@@ -259,7 +259,7 @@ const STATIC_USERS = [
     unlimitedTraffic: false,
     status: 'active',
     allowedUpstreams: ['cf-main', 'quad9-secure'],
-    allowedDomains: ['*.corp.internal', '*google.com', '*github.com', '*cloudflare.com', '*wikipedia.org'],
+    allowedDomains: ['*'],
     maxRpm: 120
   },
   {

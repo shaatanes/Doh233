@@ -521,7 +521,11 @@ export default function App() {
                       } catch (err) {}
                     }}
                     placeholder="Worker URL..."
-                    className="w-full bg-[#0a0a0a] border border-[#262626] rounded px-2 py-1.5 text-[11px] font-mono text-white placeholder-[#4b5563] focus:outline-none focus:border-[#f38020]"
+                    className={`w-full bg-[#0a0a0a] rounded px-2 py-1.5 text-[11px] font-mono placeholder-[#4b5563] focus:outline-none transition-all ${
+                      workerBaseUrl.includes('your-subdomain')
+                        ? 'border-2 border-amber-500/60 text-amber-200 animate-pulse focus:border-amber-400'
+                        : 'border border-[#262626] text-white focus:border-[#f38020]'
+                    }`}
                   />
                 </div>
                 <div className="w-full md:w-44 shrink-0">
@@ -537,6 +541,22 @@ export default function App() {
                   </select>
                 </div>
               </div>
+
+              {/* Worker URL Warning Box */}
+              {workerBaseUrl.includes('your-subdomain') && (
+                <div className="bg-[#1a1510] border border-amber-500/20 text-amber-200 p-3.5 rounded text-[11px] font-mono flex items-start space-x-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-bold text-amber-400 text-xs">⚠️ ساب‌دامین در لینک اتصال وجود ندارد / Configure your actual Cloudflare Worker URL!</p>
+                    <p className="text-[10px] text-amber-300/80 mt-1.5 leading-relaxed">
+                      لینک‌های کپی شده در جدول زیر شامل عبارت <code className="bg-black/50 px-1 py-0.5 rounded text-white text-[9px] border border-amber-500/10">your-subdomain</code> هستند. لطفاً آدرس ورکر خود را (مثلاً <code className="bg-black/50 px-1 py-0.5 rounded text-white text-[9px] border border-amber-500/10">https://doh233.g6812626.workers.dev</code>) در کادر <strong>Worker URL</strong> در بالا وارد کنید تا لینک‌های اتصال اختصاصی و معتبر دریافت کنید.
+                    </p>
+                    <p className="text-[10px] text-amber-300/80 mt-1 leading-relaxed">
+                      The copied links currently contain the <code className="bg-black/50 px-1 py-0.5 rounded text-white text-[9px] border border-amber-500/10">your-subdomain</code> placeholder. Please enter your deployed Worker URL (e.g., <code className="bg-black/50 px-1 py-0.5 rounded text-white text-[9px] border border-amber-500/10">https://doh233.g6812626.workers.dev</code>) into the <strong>Worker URL</strong> field above to get fully working, copy-paste ready links.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Main Client Table */}
               <div className="bg-[#111111] border border-[#262626] rounded overflow-hidden">

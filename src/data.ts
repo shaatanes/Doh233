@@ -22,7 +22,7 @@ export const INITIAL_USERS: User[] = [
     unlimitedTime: false,
     status: 'active',
     allowedUpstreams: ['cf-main', 'quad9-secure'],
-    allowedDomains: ['*.corp.internal', '*google.com', '*github.com', '*cloudflare.com', '*wikipedia.org'],
+    allowedDomains: ['*'],
     maxRpm: 120,
     maxConcurrent: 5,
     lastLogin: '2026-06-30T04:15:00-07:00',
