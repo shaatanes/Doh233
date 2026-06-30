@@ -1,5 +1,7 @@
 /**
  * Cloudflare Worker implementing DNS over HTTPS (DoH) - RFC 8484
+ * Production-ready backend with Multi-User mapping, Database (D1) integration,
+ * Glob domain whitelist validation, Rate limiting, and correct upstream routing.
  */
 
 // Helper to convert base64url to Uint8Array
@@ -68,29 +70,275 @@ function buildDnsQuery(name, typeStr) {
   return packet;
 }
 
+// Helper to parse domain name from DNS packet
+function parseDomainFromDnsPacket(packet) {
+  if (!packet || packet.length < 12) return "";
+  let offset = 12;
+  const parts = [];
+  const decoder = new TextDecoder("ascii");
+  while (offset < packet.length) {
+    const len = packet[offset];
+    if (len === 0) {
+      break;
+    }
+    if (offset + 1 + len > packet.length) {
+      break; // out of bounds
+    }
+    const partBytes = packet.subarray(offset + 1, offset + 1 + len);
+    parts.push(decoder.decode(partBytes));
+    offset += 1 + len;
+  }
+  return parts.join('.');
+}
+
+// Helper to check domain glob matching
+function isDomainAllowed(domain, allowedPatterns) {
+  if (!allowedPatterns || allowedPatterns.length === 0) return true;
+  if (allowedPatterns.includes('*')) return true;
+  
+  const lowerDomain = domain.toLowerCase();
+  for (const pattern of allowedPatterns) {
+    const lowerPattern = pattern.toLowerCase();
+    const escaped = lowerPattern.replace(/[-\/\\^$+?.()|[\]{}]/g, '\\$&').replace(/\\\*/g, '.*');
+    const regex = new RegExp('^' + escaped + '$');
+    if (regex.test(lowerDomain)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Helper to construct a standard DNS response with response code (RCODE)
+function buildDnsErrorResponse(queryPacket, rcode) {
+  const response = new Uint8Array(12);
+  const view = new DataView(response.buffer);
+  let txId = Math.floor(Math.random() * 65536);
+  let rd = 1;
+  
+  if (queryPacket && queryPacket.length >= 12) {
+    const qView = new DataView(queryPacket.buffer, queryPacket.byteOffset, queryPacket.byteLength);
+    txId = qView.getUint16(0);
+    const queryFlags = qView.getUint16(2);
+    rd = (queryFlags >> 8) & 1;
+  }
+  
+  view.setUint16(0, txId);
+  
+  // Flags: Response, Opcode (0), AA (0), TC (0), RD, RA (1), Z (0), RCODE
+  const flags = 0x8100 | (rd << 8) | (rcode & 0x0f);
+  view.setUint16(2, flags);
+  
+  if (queryPacket && queryPacket.length >= 12) {
+    view.setUint16(4, 1); // QDCOUNT = 1
+    let offset = 12;
+    while (offset < queryPacket.length) {
+      const len = queryPacket[offset];
+      if (len === 0) {
+        offset += 1;
+        break;
+      }
+      offset += 1 + len;
+    }
+    offset += 4; // Skip QTYPE and QCLASS
+    if (offset <= queryPacket.length) {
+      const questionSection = queryPacket.subarray(12, offset);
+      const combined = new Uint8Array(response.length + questionSection.length);
+      combined.set(response, 0);
+      combined.set(questionSection, response.length);
+      return combined;
+    }
+  }
+  return response;
+}
+
+// Helper to parse authorization token
+function getAuthToken(request, url) {
+  // Check Query params
+  if (url.searchParams.get('token')) return url.searchParams.get('token');
+  if (url.searchParams.get('apiToken')) return url.searchParams.get('apiToken');
+  if (url.searchParams.get('apiKey')) return url.searchParams.get('apiKey');
+  if (url.searchParams.get('api_key')) return url.searchParams.get('api_key');
+  if (url.searchParams.get('uuid')) return url.searchParams.get('uuid');
+  
+  // Check path parameter /dns-query/:token
+  const pathParts = url.pathname.split('/');
+  if (pathParts.length > 2 && pathParts[1] === 'dns-query' && pathParts[2]) {
+    return pathParts[2];
+  }
+  
+  // Check headers
+  const authHeader = request.headers.get('authorization');
+  if (authHeader) {
+    if (authHeader.startsWith('Bearer ')) {
+      return authHeader.substring(7);
+    }
+    return authHeader;
+  }
+  if (request.headers.get('x-api-key')) return request.headers.get('x-api-key');
+  if (request.headers.get('x-auth-token')) return request.headers.get('x-auth-token');
+  if (request.headers.get('x-uuid')) return request.headers.get('x-uuid');
+  
+  return null;
+}
+
+// In-memory rate limiting map (token -> Array of timestamps)
+const rateLimitStores = new Map();
+function checkRateLimit(token, maxRpm) {
+  const now = Date.now();
+  let timestamps = rateLimitStores.get(token) || [];
+  timestamps = timestamps.filter(t => now - t < 60000);
+  if (timestamps.length >= maxRpm) {
+    return false;
+  }
+  timestamps.push(now);
+  rateLimitStores.set(token, timestamps);
+  return true;
+}
+
+// Static fallback profiles
+const STATIC_USERS = [
+  {
+    id: 'u1',
+    uuid: '81655e46-a9af-4551-9630-863219cca7c7',
+    apiToken: 'ct_a8f902b3149c017df8a',
+    username: 'alice_dns',
+    displayName: 'Alice Peterson',
+    trafficLimit: 10 * 1024 * 1024 * 1024,
+    consumedTraffic: 4.8 * 1024 * 1024 * 1024,
+    unlimitedTraffic: false,
+    status: 'active',
+    allowedUpstreams: ['cf-main', 'quad9-secure'],
+    allowedDomains: ['*.corp.internal', '*google.com', '*github.com', '*cloudflare.com', '*wikipedia.org'],
+    maxRpm: 120
+  },
+  {
+    id: 'u2',
+    uuid: 'e2db6a14-419b-4bf1-bf17-06dfef67cb82',
+    apiToken: 'ct_90de991ab81dcd02e3b',
+    username: 'bob_homelab',
+    displayName: 'Bob Jenkins',
+    trafficLimit: 100 * 1024 * 1024 * 1024,
+    consumedTraffic: 98.2 * 1024 * 1024 * 1024,
+    unlimitedTraffic: false,
+    status: 'active',
+    allowedUpstreams: ['cf-main', 'google-dns'],
+    allowedDomains: ['*'],
+    maxRpm: 300
+  },
+  {
+    id: 'u3',
+    uuid: 'fa9900ee-8812-4aa8-a73e-3cb3d9bb22cb',
+    apiToken: 'ct_31cbff01e83a90cdd3e',
+    username: 'dev_sandbox',
+    displayName: 'Developer Sandbox',
+    trafficLimit: 0,
+    consumedTraffic: 215 * 1024 * 1024,
+    unlimitedTraffic: true,
+    status: 'active',
+    allowedUpstreams: ['cf-main', 'quad9-secure', 'adguard-dns'],
+    allowedDomains: ['*'],
+    maxRpm: 1000
+  },
+  {
+    id: 'u4',
+    uuid: 'bc8aef11-738b-4a5c-89ad-9d22ff11a7b8',
+    apiToken: 'ct_f62e84bc910def30219',
+    username: 'suspended_guest',
+    displayName: 'Temporary Guest Client',
+    trafficLimit: 500 * 1024 * 1024,
+    consumedTraffic: 498 * 1024 * 1024,
+    unlimitedTraffic: false,
+    status: 'suspended',
+    allowedUpstreams: ['google-dns'],
+    allowedDomains: ['*'],
+    maxRpm: 30
+  }
+];
+
+const STATIC_UPSTREAMS = {
+  'cf-main': 'https://cloudflare-dns.com/dns-query',
+  'google-dns': 'https://dns.google/dns-query',
+  'quad9-secure': 'https://dns.quad9.net/dns-query',
+  'adguard-dns': 'https://dns.adguard-dns.com/dns-query'
+};
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Endpoint: /dns-query
-    if (url.pathname !== '/dns-query') {
+    // Route check: /dns-query
+    if (!url.pathname.startsWith('/dns-query')) {
       return new Response('Not Found', { status: 404 });
     }
 
-    // Handle CORS preflight
+    // CORS preflight options
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Accept',
+          'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization',
           'Access-Control-Max-Age': '86400',
         }
       });
     }
 
     try {
+      // 1. Identify User Token and Profile (Supports DB query and static fallback)
+      const token = getAuthToken(request, url);
+      let user = null;
+
+      if (token) {
+        if (env.DB) {
+          try {
+            const dbUser = await env.DB.prepare(
+              "SELECT * FROM users WHERE api_token = ? OR uuid = ? OR id = ? OR username = ?"
+            ).bind(token, token, token, token).first();
+            
+            if (dbUser) {
+              user = {
+                id: dbUser.id,
+                uuid: dbUser.uuid,
+                apiToken: dbUser.api_token,
+                username: dbUser.username,
+                displayName: dbUser.display_name,
+                description: dbUser.description,
+                createdDate: dbUser.created_date,
+                expireDate: dbUser.expire_date,
+                trafficLimit: dbUser.traffic_limit,
+                consumedTraffic: dbUser.consumed_traffic,
+                unlimitedTraffic: dbUser.unlimited_traffic === 1,
+                unlimitedTime: dbUser.unlimited_time === 1,
+                status: dbUser.status,
+                allowedUpstreams: dbUser.allowed_upstreams ? dbUser.allowed_upstreams.split(',') : [],
+                allowedDomains: dbUser.allowed_domains ? dbUser.allowed_domains.split(',') : [],
+                maxRpm: dbUser.max_rpm,
+                maxConcurrent: dbUser.max_concurrent,
+                lastLogin: dbUser.last_login,
+                lastRequest: dbUser.last_request,
+                country: dbUser.country,
+                notes: dbUser.notes
+              };
+            }
+          } catch (dbErr) {
+            console.error("DB User lookup failed:", dbErr);
+          }
+        }
+        
+        if (!user) {
+          user = STATIC_USERS.find(u => 
+            u.apiToken === token || 
+            u.uuid === token || 
+            u.id === token || 
+            u.username === token
+          );
+        }
+      }
+
+      // 2. Parse DNS binary packet from request
       let dnsPacket = null;
+      let domainName = "";
+      let qType = "A";
 
       if (request.method === 'GET') {
         const name = url.searchParams.get('name');
@@ -98,31 +346,110 @@ export default {
         const dns = url.searchParams.get('dns');
 
         if (dns) {
-          dnsPacket = base64urlToBytes(dns);
-        } else if (name) {
+          try {
+            dnsPacket = base64urlToBytes(dns);
+            domainName = parseDomainFromDnsPacket(dnsPacket);
+          } catch (e) {
+            // Decoding failed
+          }
+        }
+        
+        if (!dnsPacket && name) {
           dnsPacket = buildDnsQuery(name, type || 'A');
-        } else {
-          return new Response('Missing name/type or dns query parameters', { status: 400 });
+          domainName = name;
+          qType = (type || 'A').toUpperCase();
         }
       } else if (request.method === 'POST') {
-        const contentType = request.headers.get('content-type');
-        if (contentType === 'application/dns-message') {
-          dnsPacket = new Uint8Array(await request.arrayBuffer());
-        } else {
-          return new Response('Invalid Content-Type. Expected application/dns-message', { status: 415 });
+        const arrayBuffer = await request.arrayBuffer();
+        if (arrayBuffer && arrayBuffer.byteLength > 0) {
+          dnsPacket = new Uint8Array(arrayBuffer);
+          domainName = parseDomainFromDnsPacket(dnsPacket);
         }
-      } else {
-        return new Response('Method Not Allowed', {
-          status: 405,
+      }
+
+      // If we cannot construct or parse a DNS packet under any input, return valid standard FORMERR DNS response
+      if (!dnsPacket) {
+        const errResponse = buildDnsErrorResponse(null, 1); // FORMERR
+        return new Response(errResponse, {
+          status: 200,
           headers: {
-            'Allow': 'GET, POST',
+            'Content-Type': 'application/dns-message',
             'Access-Control-Allow-Origin': '*'
           }
         });
       }
 
-      // Forward to Cloudflare DNS DoH endpoint
-      const cfResponse = await fetch('https://cloudflare-dns.com/dns-query', {
+      // 3. User Policy Enforcement (Limits, Allowed Domains, Suspensions)
+      if (user) {
+        // A. Account Status check
+        if (user.status === 'suspended' || user.status === 'disabled') {
+          const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
+          return new Response(errResponse, {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/dns-message',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+
+        // B. Traffic Quota check
+        if (!user.unlimitedTraffic) {
+          if (user.consumedTraffic >= user.trafficLimit) {
+            const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
+            return new Response(errResponse, {
+              status: 200,
+              headers: {
+                'Content-Type': 'application/dns-message',
+                'Access-Control-Allow-Origin': '*'
+              }
+            });
+          }
+        }
+
+        // C. Allowed Domains glob whitelist check
+        if (domainName && !isDomainAllowed(domainName, user.allowedDomains)) {
+          const errResponse = buildDnsErrorResponse(dnsPacket, 5); // REFUSED
+          return new Response(errResponse, {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/dns-message',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+
+        // D. Rate limits
+        if (!checkRateLimit(token, user.maxRpm)) {
+          const errResponse = buildDnsErrorResponse(dnsPacket, 2); // SERVFAIL
+          return new Response(errResponse, {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/dns-message',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+      }
+
+      // 4. Upstream DNS Resolver Selection
+      let upstreamId = url.searchParams.get('upstream') || request.headers.get('x-upstream-id');
+      let selectedUpstreamUrl = STATIC_UPSTREAMS['cf-main']; // default fallback
+
+      if (user) {
+        if (upstreamId && user.allowedUpstreams.includes(upstreamId)) {
+          selectedUpstreamUrl = STATIC_UPSTREAMS[upstreamId] || STATIC_UPSTREAMS['cf-main'];
+        } else if (user.allowedUpstreams && user.allowedUpstreams.length > 0) {
+          selectedUpstreamUrl = STATIC_UPSTREAMS[user.allowedUpstreams[0]] || STATIC_UPSTREAMS['cf-main'];
+        }
+      } else {
+        if (upstreamId && STATIC_UPSTREAMS[upstreamId]) {
+          selectedUpstreamUrl = STATIC_UPSTREAMS[upstreamId];
+        }
+      }
+
+      // 5. Forward binary request to target upstream
+      const upstreamResponse = await fetch(selectedUpstreamUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/dns-message',
@@ -131,15 +458,35 @@ export default {
         body: dnsPacket
       });
 
-      if (!cfResponse.ok) {
-        return new Response('Cloudflare DNS query failed', {
-          status: cfResponse.status,
-          headers: { 'Access-Control-Allow-Origin': '*' }
+      if (!upstreamResponse.ok) {
+        const errResponse = buildDnsErrorResponse(dnsPacket, 2); // SERVFAIL
+        return new Response(errResponse, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/dns-message',
+            'Access-Control-Allow-Origin': '*'
+          }
         });
       }
 
-      const responseBody = await cfResponse.arrayBuffer();
+      const responseBody = await upstreamResponse.arrayBuffer();
 
+      // 6. Track consumed bandwidth stats
+      if (user) {
+        const totalBytes = dnsPacket.length + responseBody.byteLength;
+        user.consumedTraffic += totalBytes; // Update in-memory fallback
+        if (env.DB) {
+          try {
+            await env.DB.prepare(
+              "UPDATE users SET consumed_traffic = consumed_traffic + ?, last_request = ? WHERE id = ?"
+            ).bind(totalBytes, new Date().toISOString(), user.id).run();
+          } catch (dbErr) {
+            console.error("Failed to update user traffic in DB:", dbErr);
+          }
+        }
+      }
+
+      // 7. Send binary DNS answer packet
       return new Response(responseBody, {
         status: 200,
         headers: {
@@ -148,9 +495,14 @@ export default {
         }
       });
     } catch (error) {
-      return new Response(`Internal DNS Resolution Error: ${error.message}`, {
-        status: 500,
-        headers: { 'Access-Control-Allow-Origin': '*' }
+      console.error('DoH forwarding error:', error);
+      const errResponse = buildDnsErrorResponse(null, 2); // SERVFAIL
+      return new Response(errResponse, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/dns-message',
+          'Access-Control-Allow-Origin': '*'
+        }
       });
     }
   }
