@@ -14,13 +14,13 @@
     {
       "binding": "DB",
       "database_name": "cf-doh-db",
-      "database_id": "<YOUR_DB_ID>"
+      "database_id": "89098686-a6d3-4147-9914-338c3d497ad8"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "DOH_KV",
-      "id": "<YOUR_KV_ID>"
+      "id": "3511d31302f04b7db428b5aea55653da"
     }
   ]
 }
