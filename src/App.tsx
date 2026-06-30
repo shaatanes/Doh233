@@ -40,6 +40,24 @@ export default function App() {
   // Active Tab View
   const [activeTab, setActiveTab] = useState<string>('dashboard');
 
+  // Worker Domain configuration for DoH Link generation
+  const [workerBaseUrl, setWorkerBaseUrl] = useState<string>(() => {
+    try {
+      return localStorage.getItem('cf_doh_worker_base_url') || 'https://cf-dns-over-https.your-subdomain.workers.dev';
+    } catch (e) {
+      return 'https://cf-dns-over-https.your-subdomain.workers.dev';
+    }
+  });
+  const [copiedUserId, setCopiedUserId] = useState<string | null>(null);
+
+  const handleCopyLink = (userId: string, link: string) => {
+    try {
+      navigator.clipboard.writeText(link);
+      setCopiedUserId(userId);
+      setTimeout(() => setCopiedUserId(null), 2000);
+    } catch (e) {}
+  };
+
   // Search, Filter and Sorting State for Users Management
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [userStatusFilter, setUserStatusFilter] = useState<'all' | 'active' | 'suspended' | 'disabled'>('all');
@@ -479,8 +497,8 @@ export default function App() {
               </div>
 
               {/* Filter grid */}
-              <div className="bg-[#111111] border border-[#262626] rounded p-3 flex flex-col sm:flex-row items-center gap-2">
-                <div className="relative w-full sm:flex-1">
+              <div className="bg-[#111111] border border-[#262626] rounded p-3 flex flex-col md:flex-row items-center gap-2">
+                <div className="relative w-full md:flex-1">
                   <Search className="w-3.5 h-3.5 text-[#4b5563] absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
@@ -490,7 +508,23 @@ export default function App() {
                     className="w-full bg-[#0a0a0a] border border-[#262626] rounded pl-9 pr-3 py-1.5 text-[11px] font-mono text-white placeholder-[#4b5563] focus:outline-none focus:border-[#f38020]"
                   />
                 </div>
-                <div className="w-full sm:w-44">
+                <div className="w-full md:w-80 flex items-center space-x-1.5 shrink-0">
+                  <span className="text-[10px] text-[#4b5563] font-mono uppercase whitespace-nowrap">Worker URL:</span>
+                  <input
+                    type="text"
+                    value={workerBaseUrl}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setWorkerBaseUrl(val);
+                      try {
+                        localStorage.setItem('cf_doh_worker_base_url', val);
+                      } catch (err) {}
+                    }}
+                    placeholder="Worker URL..."
+                    className="w-full bg-[#0a0a0a] border border-[#262626] rounded px-2 py-1.5 text-[11px] font-mono text-white placeholder-[#4b5563] focus:outline-none focus:border-[#f38020]"
+                  />
+                </div>
+                <div className="w-full md:w-44 shrink-0">
                   <select
                     value={userStatusFilter}
                     onChange={(e) => setUserStatusFilter(e.target.value as any)}
@@ -516,7 +550,7 @@ export default function App() {
                             <ArrowUpDown className="w-3 h-3" />
                           </div>
                         </th>
-                        <th className="p-3">Credentials</th>
+                        <th className="p-3">Credentials &amp; Endpoints</th>
                         <th className="p-3 cursor-pointer hover:text-white" onClick={() => handleSort('consumedTraffic')}>
                           <div className="flex items-center space-x-1">
                             <span>Consumed Traffic</span>
@@ -542,9 +576,31 @@ export default function App() {
                               <div className="font-bold text-[#e5e7eb]">{user.displayName}</div>
                               <div className="text-[10px] text-[#4b5563] mt-0.5">@{user.username}</div>
                             </td>
-                            <td className="p-3 text-[10px] space-y-0.5">
+                            <td className="p-3 text-[10px] space-y-1">
                               <div>UUID: <span className="text-[#9ca3af]">{user.uuid}</span></div>
                               <div>Token: <span className="text-[#9ca3af]">{user.apiToken}</span></div>
+                              <div className="pt-1">
+                                <div className="flex items-center space-x-1 max-w-[240px]">
+                                  <div className="bg-[#0a0a0a] border border-[#262626] rounded px-1.5 py-0.5 text-[9px] font-mono text-slate-300 truncate flex-1" title={`${workerBaseUrl.replace(/\/$/, '')}/dns-query/${user.apiToken}`}>
+                                    {`${workerBaseUrl.replace(/\/$/, '')}/dns-query/${user.apiToken}`}
+                                  </div>
+                                  <button
+                                    onClick={() => handleCopyLink(user.id, `${workerBaseUrl.replace(/\/$/, '')}/dns-query/${user.apiToken}`)}
+                                    className={`p-1 rounded border transition-all shrink-0 ${
+                                      copiedUserId === user.id
+                                        ? 'bg-green-950/40 border-green-700 text-green-400'
+                                        : 'bg-[#262626] border-[#333] hover:border-[#444] text-[#9ca3af] hover:text-white'
+                                    }`}
+                                    title="Copy DNS-over-HTTPS Endpoint URL"
+                                  >
+                                    {copiedUserId === user.id ? (
+                                      <CheckCircle className="w-3 h-3" />
+                                    ) : (
+                                      <Copy className="w-3 h-3" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
                             </td>
                             <td className="p-3">
                               <div className="font-bold text-slate-300">

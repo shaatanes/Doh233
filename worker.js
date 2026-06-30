@@ -97,6 +97,51 @@ function parseDomainFromDnsPacket(packet) {
   return parts.join('.');
 }
 
+// Helper to parse query type from DNS packet
+function parseQTypeFromDnsPacket(packet) {
+  if (!packet || packet.length < 12) return "A";
+  let offset = 12;
+  let iterations = 0;
+  while (offset < packet.length && iterations < 128) {
+    iterations++;
+    const len = packet[offset];
+    if (len === 0) {
+      offset += 1;
+      break;
+    }
+    // Check for compression pointer (starts with 11xxxxxx, i.e. >= 192)
+    if ((len & 0xc0) === 0xc0) {
+      offset += 2;
+      break;
+    }
+    offset += 1 + len;
+  }
+  if (offset + 2 <= packet.length) {
+    const typeNum = (packet[offset] << 8) | packet[offset + 1];
+    const types = {
+      1: 'A',
+      2: 'NS',
+      5: 'CNAME',
+      6: 'SOA',
+      12: 'PTR',
+      15: 'MX',
+      16: 'TXT',
+      28: 'AAAA',
+      33: 'SRV',
+      255: 'ANY'
+    };
+    return types[typeNum] || `TYPE${typeNum}`;
+  }
+  return "A";
+}
+
+// Helper to convert array buffer to hex string
+function arrayBufferToHex(buffer) {
+  return [...new Uint8Array(buffer)]
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 // Helper to check domain glob matching
 function isDomainAllowed(domain, allowedPatterns) {
   if (!allowedPatterns || allowedPatterns.length === 0) return true;
@@ -355,6 +400,7 @@ export default {
           try {
             dnsPacket = base64urlToBytes(dns);
             domainName = parseDomainFromDnsPacket(dnsPacket);
+            qType = parseQTypeFromDnsPacket(dnsPacket);
           } catch (e) {
             // Decoding failed
           }
@@ -374,6 +420,7 @@ export default {
         if (arrayBuffer && arrayBuffer.byteLength > 0) {
           dnsPacket = new Uint8Array(arrayBuffer);
           domainName = parseDomainFromDnsPacket(dnsPacket);
+          qType = parseQTypeFromDnsPacket(dnsPacket);
         }
       }
 
@@ -442,7 +489,31 @@ export default {
         }
       }
 
-      // 4. Upstream DNS Resolver Selection
+      // 4. Upstream DNS Resolver Selection or KV Cache check
+      let cacheHit = false;
+      let responseBody = null;
+      let duration = 0;
+      const cacheKey = `doh:${domainName}:${qType}`;
+      const startTime = Date.now();
+
+      if (env.DOH_KV && domainName) {
+        try {
+          const cachedHex = await env.DOH_KV.get(cacheKey);
+          if (cachedHex) {
+            // Convert hex back to ArrayBuffer
+            const bytes = new Uint8Array(cachedHex.length / 2);
+            for (let i = 0; i < cachedHex.length; i += 2) {
+              bytes[i / 2] = parseInt(cachedHex.substring(i, i + 2), 16);
+            }
+            responseBody = bytes.buffer;
+            cacheHit = true;
+            duration = Date.now() - startTime;
+          }
+        } catch (kvErr) {
+          console.error("KV Cache read error:", kvErr);
+        }
+      }
+
       let upstreamId = url.searchParams.get('upstream') || request.headers.get('x-upstream-id');
       let selectedUpstreamUrl = STATIC_UPSTREAMS['cf-main']; // default fallback
 
@@ -493,30 +564,43 @@ export default {
         selectedUpstreamUrl = STATIC_UPSTREAMS['cf-main'];
       }
 
-      // 5. Forward binary request to target upstream
-      const upstreamResponse = await fetch(selectedUpstreamUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/dns-message',
-          'Accept': 'application/dns-message'
-        },
-        body: dnsPacket
-      });
-
-      if (!upstreamResponse.ok) {
-        const errResponse = buildDnsErrorResponse(dnsPacket, 2); // SERVFAIL
-        return new Response(errResponse, {
-          status: 200,
+      if (!cacheHit) {
+        // 5. Forward binary request to target upstream
+        const upstreamResponse = await fetch(selectedUpstreamUrl, {
+          method: 'POST',
           headers: {
             'Content-Type': 'application/dns-message',
-            'Access-Control-Allow-Origin': '*'
-          }
+            'Accept': 'application/dns-message'
+          },
+          body: dnsPacket
         });
+
+        if (!upstreamResponse.ok) {
+          const errResponse = buildDnsErrorResponse(dnsPacket, 2); // SERVFAIL
+          return new Response(errResponse, {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/dns-message',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+
+        responseBody = await upstreamResponse.arrayBuffer();
+        duration = Date.now() - startTime;
+
+        // Save to KV cache if enabled
+        if (env.DOH_KV && domainName && responseBody) {
+          try {
+            const hexString = arrayBufferToHex(responseBody);
+            await env.DOH_KV.put(cacheKey, hexString, { expirationTtl: 300 });
+          } catch (kvErr) {
+            console.error("KV Cache write error:", kvErr);
+          }
+        }
       }
 
-      const responseBody = await upstreamResponse.arrayBuffer();
-
-      // 6. Track consumed bandwidth stats
+      // 6. Track consumed bandwidth stats & log to D1
       if (user) {
         const totalBytes = dnsPacket.length + responseBody.byteLength;
         user.consumedTraffic += totalBytes; // Update in-memory fallback
@@ -525,8 +609,31 @@ export default {
             await env.DB.prepare(
               "UPDATE users SET consumed_traffic = consumed_traffic + ?, last_request = ? WHERE id = ?"
             ).bind(totalBytes, new Date().toISOString(), user.id).run();
+
+            // D1 Query logging
+            const logId = 'log_' + Math.random().toString(36).substring(2, 15);
+            const clientIp = request.headers.get('cf-connecting-ip') || '127.0.0.1';
+            const country = request.headers.get('cf-ipcountry') || 'US';
+            await env.DB.prepare(
+              "INSERT INTO dns_logs (id, timestamp, user_id, username, client_ip, country, domain, type, req_size, res_size, duration, status, upstream, cache_hit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ).bind(
+              logId,
+              new Date().toISOString(),
+              user.id,
+              user.username,
+              clientIp,
+              country,
+              domainName || 'unknown',
+              qType,
+              dnsPacket.length,
+              responseBody.byteLength,
+              duration,
+              200,
+              upstreamId || 'cf-main',
+              cacheHit ? 1 : 0
+            ).run();
           } catch (dbErr) {
-            console.error("Failed to update user traffic in DB:", dbErr);
+            console.error("Failed to perform DB tracking/logging:", dbErr);
           }
         }
       }

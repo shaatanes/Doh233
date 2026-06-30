@@ -8,12 +8,12 @@ import { Cpu, CheckCircle, Copy, Code, Terminal, ExternalLink, RefreshCw, FileCo
 
 export default function DeploymentHub() {
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string>('wrangler.toml');
+  const [selectedFile, setSelectedFile] = useState<string>('wrangler.jsonc');
 
   // Definitions of all files with summary descriptions for the deploy checklist
   const projectFiles = [
     { name: 'schema.sql', desc: 'D1 Database tables (users, dns_logs, upstreams, settings, cache)', status: 'Generated' },
-    { name: 'wrangler.toml', desc: 'Wrangler deployment settings, KV binding & D1 binding configuration', status: 'Generated' },
+    { name: 'wrangler.jsonc', desc: 'Wrangler deployment settings, KV binding & D1 binding configuration', status: 'Generated' },
     { name: 'package.json', desc: 'Cloudflare Worker dependencies, script entry points', status: 'Generated' },
     { name: 'config.example.json', desc: 'Example configuration file for the DNS over HTTPS parameters', status: 'Generated' },
     { name: 'worker.js', desc: 'Core Cloudflare Workers router, RFC8484 parser, database proxy & rate-limiter', status: 'Generated' },
@@ -25,21 +25,28 @@ export default function DeploymentHub() {
   ];
 
   const fileContents: Record<string, string> = {
-    'wrangler.toml': `name = "cf-dns-over-https"
-main = "worker.js"
-compatibility_date = "2024-03-01"
-
-[vars]
-ADMIN_SESSION_TTL = 86400  # 24 Hours Session Timeout
-
-[[kv_namespaces]]
-binding = "DOH_KV"
-id = "YOUR_KV_NAMESPACE_ID_HERE"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "cf-doh-db"
-database_id = "YOUR_D1_DATABASE_ID_HERE"`,
+    'wrangler.jsonc': `{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-dns-over-https",
+  "main": "worker.js",
+  "compatibility_date": "2024-03-01",
+  "vars": {
+    "ADMIN_SESSION_TTL": 86400
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cf-doh-db",
+      "database_id": "<YOUR_DB_ID>"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "DOH_KV",
+      "id": "<YOUR_KV_ID>"
+    }
+  ]
+}`,
 
     'schema.sql': `--- D1 SQL Database Schema for Cloudflare Workers DNS over HTTPS ---
 
